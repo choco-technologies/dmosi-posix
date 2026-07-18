@@ -1,0 +1,40 @@
+{
+    "C_Cpp.default.configurationProvider": "ms-vscode.cmake-tools",
+    "cmake.buildDirectory": "${workspaceFolder}/build",
+    "cmake.sourceDirectory": "${workspaceFolder}",
+    "cmake.generator": "Unix Makefiles",
+    "cmake.configureOnOpen": true,
+    "cmake.buildBeforeRun": true,
+    "cmake.clearOutputBeforeBuild": true,
+    "cmake.configureSettings": {
+        "DMOSI_POSIX_BUILD_TESTS": "ON"
+    },
+    "files.associations": {
+        "*.h": "c",
+        "*.c": "c",
+        "CMakeLists.txt": "cmake",
+        "*.cmake": "cmake",
+        "*.dmr": "properties",
+        "*.dmm": "properties"
+    },
+    "C_Cpp.default.cStandard": "c11",
+    "C_Cpp.default.cppStandard": "c++17",
+    "C_Cpp.default.intelliSenseMode": "linux-gcc-x64",
+    "C_Cpp.default.compileCommands": "${workspaceFolder}/build/compile_commands.json",
+    "C_Cpp.errorSquiggles": "enabled",
+    "editor.tabSize": 4,
+    "editor.insertSpaces": true,
+    "editor.detectIndentation": false,
+    "files.trimTrailingWhitespace": true,
+    "files.insertFinalNewline": true,
+    "search.exclude": {
+        "**/build/CMakeFiles/**": true,
+        "**/build/**/CMakeFiles/**": true,
+        "**/build/_deps/**": true
+    },
+    "files.exclude": {
+        "**/.git": true,
+        "**/build/CMakeFiles": true,
+        "**/build/**/CMakeFiles": true
+    }
+}

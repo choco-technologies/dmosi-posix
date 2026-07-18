@@ -1,0 +1,29 @@
+{
+    "configurations": [
+        {
+            "name": "Linux",
+            "includePath": [
+                "${workspaceFolder}/src",
+                "${workspaceFolder}/lib/dmosi-proc/src",
+                "${workspaceFolder}/build/_deps/dmod-src/inc",
+                "${workspaceFolder}/build/_deps/dmod-build",
+                "${workspaceFolder}/build/_deps/dmosi-src/include",
+                "/usr/include",
+                "/usr/local/include",
+                "/usr/include/c++/**"
+            ],
+            "defines": [
+                "DMOSI_POSIX_VERSION=\"1.0\"",
+                "DMOD_EXTERNAL_REGISTRATION",
+                "_GNU_SOURCE"
+            ],
+            "compilerPath": "/usr/bin/gcc",
+            "cStandard": "c11",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "linux-gcc-x64",
+            "configurationProvider": "ms-vscode.cmake-tools",
+            "compileCommands": "${workspaceFolder}/build/compile_commands.json"
+        }
+    ],
+    "version": 4
+}

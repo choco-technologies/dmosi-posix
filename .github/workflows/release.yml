@@ -1,0 +1,236 @@
+name: Release
+
+on:
+  release:
+    types: [created]
+
+jobs:
+  build-release:
+    name: Build Release Package (x86_64)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    container:
+      image: chocotechnologies/dmod:1.0.4
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Extract version from tag
+        id: get_version
+        run: |
+          # Extract version from tag (e.g., v1.2 -> 1.2)
+          VERSION="${{ github.event.release.tag_name }}"
+          VERSION="${VERSION#v}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Extracted version: $VERSION"
+
+      - name: Build dmosi-posix (x86_64)
+        run: |
+          set -e
+          cmake -B build
+          cmake --build build -j"$(nproc)"
+
+          test -f build/libdmosi_posix.a
+          echo "✓ libdmosi_posix.a created successfully"
+          ls -la build/libdmosi_posix.a
+
+      - name: Assemble release package with mkdmrpkg
+        env:
+          PACKAGE_NAME: dmosi-posix-${{ github.event.release.tag_name }}-x86_64
+        run: |
+          set -e
+          echo "${{ github.event.release.body }}" > RELEASE_NOTES.txt
+
+          mkdmrpkg dmosi-posix.dmr \
+            -m dmosi-posix \
+            -r "$(pwd)" \
+            -b "$(pwd)/build" \
+            --name "${PACKAGE_NAME}" \
+            --add-file RELEASE_NOTES.txt
+
+          echo "Package contents:"
+          find "${PACKAGE_NAME}" -type f
+
+      - name: Create release archive
+        env:
+          PACKAGE_NAME: dmosi-posix-${{ github.event.release.tag_name }}-x86_64
+        run: |
+          set -e
+          zip -r "${PACKAGE_NAME}.zip" "${PACKAGE_NAME}"
+          echo "Created archive:"
+          ls -lh dmosi-posix-*.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-package-x86_64
+          path: dmosi-posix-${{ github.event.release.tag_name }}-x86_64.zip
+          retention-days: 1
+
+  generate-versions-manifest:
+    name: Generate versions.dmm
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Fetch all history to get all tags
+
+      - name: Generate versions.dmm
+        run: |
+          set -e
+          echo "# List of available versions for dmosi-posix" > versions.dmm
+          echo "# Generated automatically by CI" >> versions.dmm
+          echo "" >> versions.dmm
+
+          # Get all version tags (starting with 'v') and extract version numbers
+          # Exclude vlatest tag from the list
+          VERSIONS=$(git tag -l 'v*' | grep -v '^vlatest$' | sed 's/^v//' | sort -V | tr '\n' ' ' | sed 's/ $//' | xargs)
+
+          if [ -z "$VERSIONS" ]; then
+            echo "Warning: No version tags found"
+            VERSIONS="${{ github.event.release.tag_name }}"
+            VERSIONS="${VERSIONS#v}"
+          fi
+
+          echo "Found versions: $VERSIONS"
+
+          # Add $version-available directive for dmosi-posix module
+          echo "\$version-available dmosi-posix $VERSIONS" >> versions.dmm
+
+          echo "Generated versions.dmm:"
+          cat versions.dmm
+
+      - name: Upload versions.dmm as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: versions-manifest
+          path: |
+            versions.dmm
+            manifest.dmm
+          retention-days: 1
+
+  upload-release-assets:
+    name: Upload Release Assets
+    needs: [build-release, generate-versions-manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Display artifact structure
+        run: |
+          echo "Downloaded artifacts:"
+          ls -lR artifacts/
+
+      - name: Upload release assets to versioned tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          shopt -s nullglob
+          zip_files=(artifacts/release-package-*/*.zip)
+
+          if [ ${#zip_files[@]} -eq 0 ]; then
+            echo "Error: No artifacts found to upload"
+            exit 1
+          fi
+
+          for zip_file in "${zip_files[@]}"; do
+            echo "Uploading $zip_file to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
+              "$zip_file" \
+              --repo ${{ github.repository }} \
+              --clobber
+          done
+
+          # Upload versions.dmm to the versioned release
+          if [ -f artifacts/versions-manifest/versions.dmm ]; then
+            echo "Uploading versions.dmm to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
+              artifacts/versions-manifest/versions.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          # Upload manifest.dmm to the versioned release
+          if [ -f artifacts/versions-manifest/manifest.dmm ]; then
+            echo "Uploading manifest.dmm to ${{ github.event.release.tag_name }}..."
+            gh release upload ${{ github.event.release.tag_name }} \
+              artifacts/versions-manifest/manifest.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to ${{ github.event.release.tag_name }}"
+
+      - name: Create or update latest release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+
+          # Check if vlatest release exists
+          if gh release view vlatest --repo ${{ github.repository }} >/dev/null 2>&1; then
+            echo "Release vlatest exists, deleting it..."
+            gh release delete vlatest --repo ${{ github.repository }} --yes
+          fi
+
+          # Create new vlatest release
+          echo "Creating vlatest release..."
+          gh release create vlatest \
+            --repo ${{ github.repository }} \
+            --title "Latest Release (based on ${{ github.event.release.tag_name }})" \
+            --notes "This release always points to the latest stable version. Currently based on ${{ github.event.release.tag_name }}."
+
+      - name: Upload release assets to latest tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          shopt -s nullglob
+          zip_files=(artifacts/release-package-*/*.zip)
+
+          for zip_file in "${zip_files[@]}"; do
+            echo "Uploading $zip_file to vlatest..."
+            gh release upload vlatest \
+              "$zip_file" \
+              --repo ${{ github.repository }} \
+              --clobber
+          done
+
+          # Upload versions.dmm to the latest release
+          if [ -f artifacts/versions-manifest/versions.dmm ]; then
+            echo "Uploading versions.dmm to vlatest..."
+            gh release upload vlatest \
+              artifacts/versions-manifest/versions.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          # Upload manifest.dmm to the latest release
+          if [ -f artifacts/versions-manifest/manifest.dmm ]; then
+            echo "Uploading manifest.dmm to vlatest..."
+            gh release upload vlatest \
+              artifacts/versions-manifest/manifest.dmm \
+              --repo ${{ github.repository }} \
+              --clobber
+          fi
+
+          echo "Successfully uploaded ${#zip_files[@]} artifact(s) to vlatest"

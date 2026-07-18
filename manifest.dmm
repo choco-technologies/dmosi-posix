@@ -1,0 +1,5 @@
+# Include dynamically generated versions list from latest release
+$include https://github.com/choco-technologies/dmosi-posix/releases/download/vlatest/versions.dmm
+
+# Module entries with version placeholder - will be expanded by $version-available
+dmosi-posix https://github.com/choco-technologies/dmosi-posix/releases/download/v<version>/dmosi-posix-v<version>-x86_64.zip
