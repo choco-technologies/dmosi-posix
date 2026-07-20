@@ -82,6 +82,16 @@ from an RTOS backend:
 - `Dmod_GetLeftStackSize()` (a `Dmod` SAL hook, not part of `dmosi.h` itself)
   is also implemented, using `pthread_getattr_np()` to find the calling
   thread's real stack bounds.
+- **Exit callbacks** (`dmosi_thread_register_exit_callback()` /
+  `dmosi_thread_unregister_exit_callback()`) are invoked from whichever call
+  actually ends the thread: the thread's own wrapper on normal completion, or
+  the caller of `dmosi_thread_kill()` / `dmosi_thread_destroy()` when the
+  thread is force-terminated. This matters under POSIX because
+  `dmosi_thread_kill()` uses asynchronous cancellation, which can strike the
+  target thread at any point - it may never reach its own wrapper's
+  completion code - so callback delivery is made idempotent (safe to trigger
+  from more than one of these sites) rather than relying on a single fixed
+  point.
 
 ## Process API
 

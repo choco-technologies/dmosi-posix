@@ -240,6 +240,26 @@ static void slow_thread_entry( void * arg )
     dmosi_thread_sleep( 60000 );
 }
 
+static volatile int g_exit_callback_count = 0;
+static dmosi_thread_t g_exit_callback_thread = NULL;
+
+static void exit_callback( dmosi_thread_t thread, void * arg )
+{
+    ( void ) arg;
+    g_exit_callback_count++;
+    g_exit_callback_thread = thread;
+}
+
+static void pausing_thread_entry( void * arg )
+{
+    ( void ) arg;
+    /* Gives the caller a window to register an exit callback before this
+     * thread completes, avoiding a race against dmosi_thread_create()
+     * returning and the thread finishing almost instantly. */
+    dmosi_thread_sleep( 50 );
+    g_thread_ran = true;
+}
+
 static void test_thread( void )
 {
     printf( "\n=== Testing thread ===\n" );
@@ -291,6 +311,82 @@ static void test_thread( void )
     TEST_ASSERT( dmosi_thread_join( slow ) == 0,
                  "Join killed thread returns 0" );
     dmosi_thread_destroy( slow );
+
+    /* Exit callback: invoked on normal completion */
+    g_exit_callback_count = 0;
+    g_exit_callback_thread = NULL;
+    dmosi_thread_t cb_t = dmosi_thread_create(
+        pausing_thread_entry, NULL, 1, 65536, "cb_t", NULL );
+    TEST_ASSERT( cb_t != NULL, "Create thread for exit callback test" );
+
+    dmosi_thread_exit_callback_handle_t cb_handle =
+        dmosi_thread_register_exit_callback( cb_t, exit_callback, NULL );
+    TEST_ASSERT( cb_handle != NULL, "Register exit callback on running thread" );
+
+    TEST_ASSERT( dmosi_thread_join( cb_t ) == 0,
+                 "Join thread with registered exit callback" );
+    TEST_ASSERT( g_exit_callback_count == 1,
+                 "Exit callback invoked exactly once on normal completion" );
+    TEST_ASSERT( g_exit_callback_thread == cb_t,
+                 "Exit callback received the correct thread handle" );
+
+    dmosi_thread_destroy( cb_t );
+
+    /* Exit callback: unregistering before termination prevents invocation */
+    g_exit_callback_count = 0;
+    dmosi_thread_t unreg_t = dmosi_thread_create(
+        slow_thread_entry, NULL, 1, 65536, "unreg_t", NULL );
+    TEST_ASSERT( unreg_t != NULL, "Create thread for unregister test" );
+
+    dmosi_thread_exit_callback_handle_t unreg_handle =
+        dmosi_thread_register_exit_callback( unreg_t, exit_callback, NULL );
+    TEST_ASSERT( unreg_handle != NULL, "Register exit callback on second thread" );
+    TEST_ASSERT( dmosi_thread_unregister_exit_callback( unreg_t, unreg_handle ) == 0,
+                 "Unregister exit callback before thread terminates" );
+    TEST_ASSERT( dmosi_thread_unregister_exit_callback( unreg_t, unreg_handle ) == -EINVAL,
+                 "Unregistering an already-removed callback returns -EINVAL" );
+
+    TEST_ASSERT( dmosi_thread_kill( unreg_t, 0 ) == 0,
+                 "Kill thread after unregistering callback" );
+    TEST_ASSERT( dmosi_thread_join( unreg_t ) == 0, "Join killed thread" );
+    TEST_ASSERT( g_exit_callback_count == 0, "Unregistered callback is not invoked" );
+
+    dmosi_thread_destroy( unreg_t );
+
+    /* Exit callback: invoked when the thread is killed */
+    g_exit_callback_count = 0;
+    dmosi_thread_t kill_t = dmosi_thread_create(
+        slow_thread_entry, NULL, 1, 65536, "kill_t", NULL );
+    TEST_ASSERT( kill_t != NULL, "Create thread for kill callback test" );
+    TEST_ASSERT( dmosi_thread_register_exit_callback( kill_t, exit_callback, NULL ) != NULL,
+                 "Register exit callback on thread that will be killed" );
+    TEST_ASSERT( dmosi_thread_kill( kill_t, 0 ) == 0,
+                 "Kill thread with registered exit callback" );
+    TEST_ASSERT( dmosi_thread_join( kill_t ) == 0, "Join killed thread" );
+    TEST_ASSERT( g_exit_callback_count == 1,
+                 "Exit callback invoked exactly once on kill" );
+
+    dmosi_thread_destroy( kill_t );
+
+    /* Exit callback: registering on an already-terminated thread fails */
+    dmosi_thread_t done_t = dmosi_thread_create(
+        simple_thread_entry, NULL, 1, 65536, "done_t", NULL );
+    TEST_ASSERT( done_t != NULL, "Create thread for post-completion registration test" );
+    TEST_ASSERT( dmosi_thread_join( done_t ) == 0,
+                 "Join thread before registering callback" );
+    TEST_ASSERT( dmosi_thread_register_exit_callback( done_t, exit_callback, NULL ) == NULL,
+                 "Registering exit callback on an already-terminated thread returns NULL" );
+    dmosi_thread_destroy( done_t );
+
+    /* Exit callback: invalid argument handling */
+    TEST_ASSERT( dmosi_thread_register_exit_callback( NULL, exit_callback, NULL ) == NULL,
+                 "Register exit callback with NULL thread returns NULL" );
+    TEST_ASSERT( dmosi_thread_register_exit_callback( current, NULL, NULL ) == NULL,
+                 "Register exit callback with NULL callback returns NULL" );
+    TEST_ASSERT( dmosi_thread_unregister_exit_callback( NULL, ( dmosi_thread_exit_callback_handle_t ) 1 ) == -EINVAL,
+                 "Unregister exit callback with NULL thread returns -EINVAL" );
+    TEST_ASSERT( dmosi_thread_unregister_exit_callback( current, NULL ) == -EINVAL,
+                 "Unregister exit callback with NULL handle returns -EINVAL" );
 
     size_t count = dmosi_thread_get_all( NULL, 0 );
     TEST_ASSERT( count >= 1, "thread_get_all count >= 1" );

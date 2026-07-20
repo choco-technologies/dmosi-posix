@@ -41,6 +41,18 @@
 static dmosi_process_t g_init_process = NULL;
 
 /**
+ * @brief Node for a single registered thread exit callback
+ *
+ * Stored as a singly-linked list on struct dmosi_thread. The node pointer
+ * itself is handed out as the opaque dmosi_thread_exit_callback_handle_t.
+ */
+struct dmosi_thread_exit_callback {
+    dmosi_thread_exit_callback_t callback;     /**< Callback to invoke on thread exit */
+    void* arg;                                 /**< User-provided argument for the callback */
+    struct dmosi_thread_exit_callback* next;   /**< Next registration, or NULL */
+};
+
+/**
  * @brief Internal structure wrapping a POSIX thread
  */
 struct dmosi_thread {
@@ -54,6 +66,7 @@ struct dmosi_thread {
     char* name;                       /**< Thread name (owned copy) */
     int priority;                     /**< Requested priority (metadata only - see note below) */
     struct dmosi_thread* next;        /**< Intrusive link for the global thread registry */
+    struct dmosi_thread_exit_callback* exit_callbacks; /**< Registered exit callbacks (singly-linked) */
 };
 
 /*
@@ -71,6 +84,15 @@ struct dmosi_thread {
 
 static pthread_mutex_t g_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
 static struct dmosi_thread* g_registry_head = NULL;
+
+/**
+ * @brief Guards the exit-callback list of every thread
+ *
+ * A single global lock, mirroring the FreeRTOS backend's use of one global
+ * critical section for the same purpose - registration/unregistration are
+ * rare, so there is no benefit to a per-thread lock.
+ */
+static pthread_mutex_t g_exit_callback_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static pthread_key_t g_tls_key;
 static pthread_once_t g_tls_once = PTHREAD_ONCE_INIT;
@@ -172,6 +194,7 @@ static struct dmosi_thread* thread_new(pthread_t handle, dmosi_thread_entry_t en
     thread->priority = priority;
     thread->name = (name != NULL) ? Dmod_StrDup(name) : NULL;
     thread->next = NULL;
+    thread->exit_callbacks = NULL;
 
     return thread;
 }
@@ -180,6 +203,35 @@ static void thread_free(struct dmosi_thread* thread)
 {
     Dmod_Free(thread->name);
     Dmod_Free(thread);
+}
+
+/**
+ * @brief Detach and invoke all exit callbacks registered on a thread
+ *
+ * Atomically detaches the callback list from the thread (so a concurrent
+ * dmosi_thread_register_exit_callback()/dmosi_thread_unregister_exit_callback()
+ * call no longer sees it), then invokes and frees each node outside the lock
+ * so user callback code never runs while holding it.
+ *
+ * Safe to call more than once for the same thread: once detached the list is
+ * empty, so a repeated call (e.g. from both thread_wrapper() and a racing
+ * dmosi_thread_destroy()) is a no-op.
+ *
+ * @param thread Thread that is terminating
+ */
+static void thread_invoke_exit_callbacks(struct dmosi_thread* thread)
+{
+    pthread_mutex_lock(&g_exit_callback_mutex);
+    struct dmosi_thread_exit_callback* node = thread->exit_callbacks;
+    thread->exit_callbacks = NULL;
+    pthread_mutex_unlock(&g_exit_callback_mutex);
+
+    while (node != NULL) {
+        struct dmosi_thread_exit_callback* next = node->next;
+        node->callback((dmosi_thread_t)thread, node->arg);
+        Dmod_Free(node);
+        node = next;
+    }
 }
 
 /**
@@ -201,6 +253,11 @@ static void* thread_wrapper(void* arg)
     if (thread->entry != NULL) {
         thread->entry(thread->arg);
     }
+
+    // Invoke registered exit callbacks before marking the thread as completed,
+    // so a joiner that wakes up on completion never observes callbacks as
+    // still pending.
+    thread_invoke_exit_callbacks(thread);
 
     atomic_store(&thread->completed, true);
     pthread_setspecific(g_tls_key, NULL);
@@ -295,6 +352,13 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, void, _thread_destroy, (dmosi_thread_t t
         pthread_detach(thread->handle);
     }
 
+    // A thread force-cancelled above never reaches thread_wrapper's own
+    // completion path - PTHREAD_CANCEL_ASYNCHRONOUS can strike at any point,
+    // including inside the entry function - so invoke any still-pending exit
+    // callbacks here. A no-op if thread_wrapper (or dmosi_thread_kill())
+    // already ran them.
+    thread_invoke_exit_callbacks(thread);
+
     registry_remove(thread);
     thread_free(thread);
 }
@@ -325,6 +389,11 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _thread_kill, (dmosi_thread_t threa
     }
 
     (void)status;
+
+    // A killed thread never reaches thread_wrapper's own completion path, so
+    // invoke its exit callbacks here. When killing another thread these run
+    // in the killer's context (the killed thread is cancelled, not resumed).
+    thread_invoke_exit_callbacks(thread);
 
     atomic_store(&thread->completed, true);
 
@@ -499,6 +568,94 @@ DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _thread_get_info, (dmosi_thread_t t
         info->cpu_usage = 0.0f;
     }
 
+    return 0;
+}
+
+/**
+ * @brief Register a callback to be invoked when a thread terminates
+ *
+ * Multiple callbacks may be registered on the same thread; all of them are
+ * invoked (in most-recently-registered-first order) when the thread
+ * terminates, whether it exits normally, is killed via dmosi_thread_kill(),
+ * or is force-terminated via dmosi_thread_destroy().
+ *
+ * Registering on a thread that has already terminated fails (returns NULL):
+ * its exit callbacks have already run and been discarded, so there is
+ * nothing left to attach to.
+ *
+ * @param thread Thread handle to observe (must not be NULL)
+ * @param callback Callback function to invoke on thread exit
+ * @param arg User-provided argument passed to the callback
+ * @return dmosi_thread_exit_callback_handle_t Handle identifying this registration, NULL on failure
+ */
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, dmosi_thread_exit_callback_handle_t, _thread_register_exit_callback,
+    (dmosi_thread_t thread, dmosi_thread_exit_callback_t callback, void* arg) )
+{
+    if (thread == NULL || callback == NULL) {
+        return NULL;
+    }
+
+    const char* allocator_name = dmosi_thread_get_module_name(thread);
+    if (allocator_name == NULL) {
+        allocator_name = DMOSI_SYSTEM_MODULE_NAME;
+    }
+
+    struct dmosi_thread_exit_callback* node = Dmod_MallocEx(sizeof(*node), allocator_name);
+    if (node == NULL) {
+        return NULL;
+    }
+    node->callback = callback;
+    node->arg = arg;
+
+    pthread_mutex_lock(&g_exit_callback_mutex);
+    bool already_completed = atomic_load(&thread->completed);
+    if (!already_completed) {
+        node->next = thread->exit_callbacks;
+        thread->exit_callbacks = node;
+    }
+    pthread_mutex_unlock(&g_exit_callback_mutex);
+
+    if (already_completed) {
+        Dmod_Free(node);
+        return NULL;
+    }
+
+    return (dmosi_thread_exit_callback_handle_t)node;
+}
+
+/**
+ * @brief Unregister a previously registered thread exit callback
+ *
+ * @param thread Thread handle the callback was registered on
+ * @param handle Handle returned by dmosi_thread_register_exit_callback
+ * @return int 0 on success, -EINVAL if the thread/handle is invalid or the
+ *         callback was already unregistered / already invoked
+ */
+DMOD_INPUT_API_DECLARATION( dmosi, 1.0, int, _thread_unregister_exit_callback,
+    (dmosi_thread_t thread, dmosi_thread_exit_callback_handle_t handle) )
+{
+    if (thread == NULL || handle == NULL) {
+        return -EINVAL;
+    }
+
+    struct dmosi_thread_exit_callback* target = (struct dmosi_thread_exit_callback*)handle;
+
+    pthread_mutex_lock(&g_exit_callback_mutex);
+    struct dmosi_thread_exit_callback** link = &thread->exit_callbacks;
+    while (*link != NULL && *link != target) {
+        link = &(*link)->next;
+    }
+    bool found = (*link == target);
+    if (found) {
+        *link = target->next;
+    }
+    pthread_mutex_unlock(&g_exit_callback_mutex);
+
+    if (!found) {
+        return -EINVAL;
+    }
+
+    Dmod_Free(target);
     return 0;
 }
 
