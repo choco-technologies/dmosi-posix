@@ -89,6 +89,7 @@ add_library(dmosi_posix STATIC
     src/dmosi_timer.c
     src/dmosi_time.c
     src/dmosi_interrupt.c
+    src/dmosi_rand.c
 )
 
 target_link_libraries(dmosi_posix PUBLIC

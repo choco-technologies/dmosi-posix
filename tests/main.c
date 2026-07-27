@@ -452,6 +452,38 @@ static void test_tick_count( void )
 }
 
 /* =========================================================================
+ * Random number tests
+ * ========================================================================= */
+static void test_rand( void )
+{
+    printf( "\n=== Testing random number API ===\n" );
+
+    uint32_t r1 = dmosi_rand32();
+    uint32_t r2 = dmosi_rand32();
+    TEST_ASSERT( r1 != r2, "dmosi_rand32() returns different values on consecutive calls" );
+
+    uint8_t buffer[ 16 ];
+    memset( buffer, 0, sizeof( buffer ) );
+    dmosi_rand_bytes( buffer, sizeof( buffer ) );
+
+    bool all_zero = true;
+    for( size_t i = 0; i < sizeof( buffer ); i++ )
+    {
+        if( buffer[ i ] != 0 )
+        {
+            all_zero = false;
+            break;
+        }
+    }
+    TEST_ASSERT( !all_zero, "dmosi_rand_bytes() fills buffer with non-zero data" );
+
+    /* NULL buffer / zero length must not crash */
+    dmosi_rand_bytes( NULL, sizeof( buffer ) );
+    dmosi_rand_bytes( buffer, 0 );
+    TEST_ASSERT( true, "dmosi_rand_bytes() with NULL buffer or zero length does not crash" );
+}
+
+/* =========================================================================
  * is_started / interrupt API tests
  * ========================================================================= */
 static void test_is_started( void )
@@ -509,6 +541,7 @@ int main( void )
     test_timer();
     test_thread();
     test_tick_count();
+    test_rand();
     test_is_started();
     test_interrupt_api();
     test_init_deinit();
