@@ -5,11 +5,58 @@ on:
     types: [created]
 
 jobs:
+  discover-architectures:
+    name: Discover Architectures
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    container:
+      image: chocotechnologies/dmod:1.0.4
+    outputs:
+      architectures: ${{ steps.list-archs.outputs.architectures }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Fetch dmod to discover architectures
+        run: |
+          mkdir -p build_discovery
+          cd build_discovery
+          cmake ..
+
+      - name: List available architectures
+        id: list-archs
+        run: |
+          DMOD_SRC_DIR=$(find build_discovery -path "*/_deps/dmod-src" -type d | head -1)
+
+          # dmosi-posix wraps pthreads/librt, so it only builds on dmod's
+          # full-OS targets (e.g. x86_64, RaspberryPI 3B's armv7/aarch64
+          # cortex-a53). Bare-metal MCU targets (cortex-m*, esp32s3, ...)
+          # explicitly disable pthread support in their tools-cfg.cmake and
+          # cannot build this library, so they are excluded here.
+          ARCHS=$(for f in $(find ${DMOD_SRC_DIR}/configs/arch -name "tools-cfg.cmake"); do
+            if ! grep -q "DMOD_USE_PTHREAD.*OFF" "$f"; then
+              echo "$f"
+            fi
+          done | \
+            sed "s|${DMOD_SRC_DIR}/configs/arch/||g" | \
+            sed 's|/tools-cfg.cmake||g' | \
+            jq -R -s -c 'split("\n") | map(select(length > 0))')
+
+          echo "Found architectures: $ARCHS"
+          echo "architectures=$ARCHS" >> $GITHUB_OUTPUT
+
   build-release:
-    name: Build Release Package (x86_64)
+    name: Build Release for ${{ matrix.arch_name }}
+    needs: discover-architectures
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    strategy:
+      matrix:
+        arch_name: ${{ fromJson(needs.discover-architectures.outputs.architectures) }}
 
     container:
       image: chocotechnologies/dmod:1.0.4
@@ -29,27 +76,31 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Extracted version: $VERSION"
 
-      - name: Build dmosi-posix (x86_64)
+      - name: Build dmosi-posix for ${{ matrix.arch_name }}
         run: |
           set -e
-          cmake -B build
-          cmake --build build -j"$(nproc)"
+          ARCH_DIR_NAME=$(echo "${{ matrix.arch_name }}" | sed 's|/|-|g')
+          echo "ARCH_DIR_NAME=$ARCH_DIR_NAME" >> $GITHUB_ENV
+          echo "ARTIFACT_NAME=release-$ARCH_DIR_NAME" >> $GITHUB_ENV
 
-          test -f build/libdmosi_posix.a
-          echo "✓ libdmosi_posix.a created successfully"
-          ls -la build/libdmosi_posix.a
+          cmake -B "build_$ARCH_DIR_NAME" -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }}
+          cmake --build "build_$ARCH_DIR_NAME" --target dmosi_posix -j"$(nproc)"
+
+          test -f "build_$ARCH_DIR_NAME/libdmosi_posix.a"
+          echo "✓ libdmosi_posix.a created successfully for ${{ matrix.arch_name }}"
+          ls -la "build_$ARCH_DIR_NAME/libdmosi_posix.a"
 
       - name: Assemble release package with mkdmrpkg
-        env:
-          PACKAGE_NAME: dmosi-posix-${{ github.event.release.tag_name }}-x86_64
         run: |
           set -e
+          PACKAGE_NAME="dmosi-posix-${{ github.event.release.tag_name }}-${ARCH_DIR_NAME}"
+          echo "PACKAGE_NAME=$PACKAGE_NAME" >> $GITHUB_ENV
           echo "${{ github.event.release.body }}" > RELEASE_NOTES.txt
 
           mkdmrpkg dmosi-posix.dmr \
             -m dmosi-posix \
             -r "$(pwd)" \
-            -b "$(pwd)/build" \
+            -b "$(pwd)/build_${ARCH_DIR_NAME}" \
             --name "${PACKAGE_NAME}" \
             --add-file RELEASE_NOTES.txt
 
@@ -57,8 +108,6 @@ jobs:
           find "${PACKAGE_NAME}" -type f
 
       - name: Create release archive
-        env:
-          PACKAGE_NAME: dmosi-posix-${{ github.event.release.tag_name }}-x86_64
         run: |
           set -e
           # zip the package directory's *contents*, not the directory itself -
@@ -72,12 +121,13 @@ jobs:
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: release-package-x86_64
-          path: dmosi-posix-${{ github.event.release.tag_name }}-x86_64.zip
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.PACKAGE_NAME }}.zip
           retention-days: 1
 
   generate-versions-manifest:
     name: Generate versions.dmm
+    needs: discover-architectures
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -147,7 +197,7 @@ jobs:
         run: |
           set -e
           shopt -s nullglob
-          zip_files=(artifacts/release-package-*/*.zip)
+          zip_files=(artifacts/release-*/*.zip)
 
           if [ ${#zip_files[@]} -eq 0 ]; then
             echo "Error: No artifacts found to upload"
@@ -209,7 +259,7 @@ jobs:
         run: |
           set -e
           shopt -s nullglob
-          zip_files=(artifacts/release-package-*/*.zip)
+          zip_files=(artifacts/release-*/*.zip)
 
           for zip_file in "${zip_files[@]}"; do
             echo "Uploading $zip_file to vlatest..."
