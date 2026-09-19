@@ -6,6 +6,7 @@ project(dmosi_posix_tests
     LANGUAGES C)
 
 add_executable(${PROJECT_NAME} main.c)
+dmod_set_current_allocator(${PROJECT_NAME})
 
 target_link_libraries(${PROJECT_NAME}
     dmosi_posix

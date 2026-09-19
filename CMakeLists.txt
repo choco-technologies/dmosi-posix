@@ -99,6 +99,10 @@ target_link_libraries(dmosi_posix PUBLIC
     Threads::Threads
 )
 
+# dmod_sal.h requires DMOD_CURRENT_ALLOCATOR to be defined on the system side -
+# see dmod's dmod_set_current_allocator() in scripts/CMakeLists.txt.
+dmod_set_current_allocator(dmosi_posix)
+
 # POSIX interval timers (timer_create/timer_settime/timer_delete) require librt
 # on some libc versions; harmless to link even where it has been folded into libc.
 find_library(DMOSI_POSIX_RT_LIBRARY rt)
