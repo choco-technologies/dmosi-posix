@@ -84,6 +84,17 @@ jobs:
           echo "ARTIFACT_NAME=release-$ARCH_DIR_NAME" >> $GITHUB_ENV
 
           cmake -B "build_$ARCH_DIR_NAME" -DDMOD_TOOLS_NAME=arch/${{ matrix.arch_name }}
+          case "${{ matrix.arch_name }}" in
+            x86_64) EXPECTED_COMPILER=gcc ;;
+            aarch64/*) EXPECTED_COMPILER=aarch64-linux-gnu-gcc ;;
+            armv7/cortex-a53) EXPECTED_COMPILER=arm-linux-gnueabihf-gcc ;;
+            *) echo "Unsupported POSIX architecture: ${{ matrix.arch_name }}"; exit 1 ;;
+          esac
+          C_COMPILER=$(sed -n 's/^CMAKE_C_COMPILER:[^=]*=//p' "build_$ARCH_DIR_NAME/CMakeCache.txt")
+          test "$(basename "$C_COMPILER")" = "$EXPECTED_COMPILER" || {
+            echo "Wrong compiler for ${{ matrix.arch_name }}: $C_COMPILER (expected $EXPECTED_COMPILER)"
+            exit 1
+          }
           cmake --build "build_$ARCH_DIR_NAME" --target dmosi_posix -j"$(nproc)"
 
           test -f "build_$ARCH_DIR_NAME/libdmosi_posix.a"
