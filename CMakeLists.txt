@@ -4,14 +4,6 @@
 cmake_minimum_required(VERSION 3.10)
 
 # ======================================================================
-#               DMOD OSI POSIX
-# ======================================================================
-project(dmosi_posix
-    VERSION 1.0
-    DESCRIPTION "DMOD OS Interface for POSIX"
-    LANGUAGES C CXX)
-
-# ======================================================================
 #               For VS Code
 # ======================================================================
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
@@ -49,6 +41,17 @@ if(NOT TARGET dmod_inc)
 else()
     message(STATUS "dmod target already exists, skipping FetchContent")
 endif()
+
+# ======================================================================
+#               DMOD OSI POSIX
+# ======================================================================
+# DMOD must configure the architecture-specific compilers before this project
+# enables C/CXX. Otherwise CMake locks in the host compiler and release
+# artifacts are mislabeled when DMOD_TOOLS_NAME selects another architecture.
+project(dmosi_posix
+    VERSION 1.0
+    DESCRIPTION "DMOD OS Interface for POSIX"
+    LANGUAGES C CXX)
 
 # ======================================================================
 #               Fetch DMOD OS Interface
@@ -113,6 +116,7 @@ endif()
 # Define version string for the library
 target_compile_definitions(dmosi_posix PRIVATE
     DMOSI_POSIX_VERSION="${PROJECT_VERSION}"
+    _POSIX_C_SOURCE=200809L
 )
 
 # Treat warnings as errors for this project's sources
